@@ -33,7 +33,7 @@ static int g_targetFps = 30;
 
 // Telemetry & FPS stats
 static int g_renderedFrames = 0;
-static double g_measuredFps = 30.0;
+static double g_measuredFps = 0.0;
 static auto g_lastFpsTime = std::chrono::steady_clock::now();
 
 // Hotkey registration status
@@ -221,12 +221,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (vcamActive)
         {
             SetTextColor(hdc, RGB(96, 165, 250)); // Bright Blue
-            TextOutA(hdc, 20, 64, "Virtual Camera: 'UnityCapture' (CONNECTED & TRANSMITTING)", 56);
+            const char* status = "Virtual Camera: UnityCapture bridge open (verify image in Chrome)";
+            TextOutA(hdc, 20, 64, status, lstrlenA(status));
         }
         else
         {
             SetTextColor(hdc, RGB(160, 165, 175)); // Muted Gray
-            TextOutA(hdc, 20, 64, "Virtual Camera: 'UnityCapture' (Ready, waiting for Chrome)", 57);
+            const char* status = "Virtual Camera: waiting for UnityCapture receiver";
+            TextOutA(hdc, 20, 64, status, lstrlenA(status));
         }
 
         // Line 4: Hotkey Commands
