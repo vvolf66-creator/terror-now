@@ -10,8 +10,8 @@ add_executable(ScareCam WIN32
     CameraCapture.cpp
     VirtualCamSender.h
     VirtualCamSender.cpp
-    DiagnosticEffect.h
-    DiagnosticEffect.cpp
+    HorrorEffects.h
+    HorrorEffects.cpp
     shared.inl
 )
 
@@ -21,7 +21,6 @@ target_link_libraries(ScareCam PRIVATE
     ole32
     oleaut32
     mfplat
-    mf
     mfreadwrite
     mfuuid
 )
