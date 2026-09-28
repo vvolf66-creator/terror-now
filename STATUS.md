@@ -1,6 +1,6 @@
 # ScareCam Windows 10 technical build candidate
 
-This package contains **source code only**. There is no executable in this ZIP, and no successful Windows CI run has been observed. Do not install the virtual camera filter or run the app until a Windows build succeeds and the binary is reviewed.
+The Windows CI build succeeded on 2026-09-28 (run #2, commit `48bf01a`) and produced a 64-bit Windows executable. The artifact was inspected as a PE32+ x86-64 binary. It has **not** been executed on the target PC. Webcam preview, Unity Capture interoperability, Chrome enumeration, performance and latency remain unverified.
 
 The included GitHub Actions workflow runs once when the initial `BUILD_NOW` marker is added and supports manual runs (`workflow_dispatch`) later. A standard runner in a public GitHub repository is free under GitHub's current published billing rules. Publishing the source makes it publicly accessible. A private repository may consume the account's remaining Actions quota.
 
@@ -12,7 +12,7 @@ Review changes from the AI Studio ZIP:
 - Converted Media Foundation BGRX pixels to RGBA for Unity Capture.
 
 Still unverified:
-- Windows compilation and Unity Capture protocol interoperability.
+- Unity Capture protocol interoperability on the target PC.
 - The webcam's native media types, stride and row orientation on the target PC.
 - Chrome enumeration, frame rate, latency, CPU and RAM usage.
 
