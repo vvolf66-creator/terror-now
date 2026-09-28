@@ -18,7 +18,6 @@
 
 #pragma once
 
-#define _HAS_EXCEPTIONS 0
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <initguid.h>
