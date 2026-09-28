@@ -9,31 +9,24 @@
 
 #include "CameraCapture.h"
 #include "VirtualCamSender.h"
-#include "DiagnosticEffect.h"
+#include "HorrorEffects.h"
 
 // Hotkey IDs
-#define HOTKEY_ID_F8 9001
-#define HOTKEY_ID_F9 9002
-
-enum class AppMode
-{
-    NORMAL,
-    DIAGNOSTIC
-};
+#define HOTKEY_ID_F6 9001
+#define HOTKEY_ID_F7 9002
+#define HOTKEY_ID_F8 9003
+#define HOTKEY_ID_F9 9004
 
 // Global Application State
 static HWND g_hWnd = NULL;
 static bool g_isRunning = true;
-static AppMode g_mode = AppMode::NORMAL;
-static std::chrono::steady_clock::time_point g_diagnosticStartTime;
-static const int DIAGNOSTIC_DURATION_MS = 450;
 
 static CameraCapture g_camera;
 static VirtualCamSender g_virtualCam;
-static DiagnosticEffect g_effect;
+static HorrorEffects g_horror;
 
-static std::vector<uint8_t> g_rawFrameBuffer;
-static std::vector<uint8_t> g_processedFrameBuffer;
+static std::vector<uint8_t> g_rawBgraBuffer;
+static std::vector<uint8_t> g_processedBgraBuffer;
 static int g_currentWidth = 1280;
 static int g_currentHeight = 720;
 static int g_targetFps = 30;
@@ -43,16 +36,33 @@ static int g_renderedFrames = 0;
 static double g_measuredFps = 30.0;
 static auto g_lastFpsTime = std::chrono::steady_clock::now();
 
-void SetModeNormal()
+// Hotkey registration status
+static bool g_f6Registered = false;
+static bool g_f7Registered = false;
+static bool g_f8Registered = false;
+static bool g_f9Registered = false;
+
+void TriggerEffect1()
 {
-    g_mode = AppMode::NORMAL;
+    g_horror.TriggerEffect(HorrorEffectType::EDGE_LURKER);
     InvalidateRect(g_hWnd, NULL, FALSE);
 }
 
-void SetModeDiagnostic()
+void TriggerEffect2()
 {
-    g_mode = AppMode::DIAGNOSTIC;
-    g_diagnosticStartTime = std::chrono::steady_clock::now();
+    g_horror.TriggerEffect(HorrorEffectType::SUDDEN_LUNGER);
+    InvalidateRect(g_hWnd, NULL, FALSE);
+}
+
+void TriggerEffect3()
+{
+    g_horror.TriggerEffect(HorrorEffectType::HAUNTED_ANOMALY);
+    InvalidateRect(g_hWnd, NULL, FALSE);
+}
+
+void EmergencyRestoreNormal()
+{
+    g_horror.RestoreNormal();
     InvalidateRect(g_hWnd, NULL, FALSE);
 }
 
@@ -61,7 +71,11 @@ void SwitchResolution(int w, int h)
     g_currentWidth = w;
     g_currentHeight = h;
     g_camera.Stop();
-    g_camera.Start(0, g_currentWidth, g_currentHeight, g_targetFps);
+    if (!g_camera.Start(0, g_currentWidth, g_currentHeight, g_targetFps))
+    {
+        // Fallback if requested resolution failed
+        g_camera.Start(0, 640, 480, 30);
+    }
     g_currentWidth = g_camera.GetWidth();
     g_currentHeight = g_camera.GetHeight();
 }
@@ -71,13 +85,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     switch (msg)
     {
     case WM_HOTKEY:
-        if (wParam == HOTKEY_ID_F8)
+        if (wParam == HOTKEY_ID_F6)
         {
-            SetModeDiagnostic();
+            TriggerEffect1();
+        }
+        else if (wParam == HOTKEY_ID_F7)
+        {
+            TriggerEffect2();
+        }
+        else if (wParam == HOTKEY_ID_F8)
+        {
+            TriggerEffect3();
         }
         else if (wParam == HOTKEY_ID_F9)
         {
-            SetModeNormal();
+            EmergencyRestoreNormal();
         }
         break;
 
@@ -86,21 +108,29 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             PostQuitMessage(0);
         }
+        else if (wParam == '1' || wParam == VK_F6)
+        {
+            TriggerEffect1();
+        }
+        else if (wParam == '2' || wParam == VK_F7)
+        {
+            TriggerEffect2();
+        }
+        else if (wParam == '3' || wParam == VK_F8)
+        {
+            TriggerEffect3();
+        }
+        else if (wParam == '0' || wParam == '9' || wParam == 'N' || wParam == VK_F9)
+        {
+            EmergencyRestoreNormal();
+        }
         else if (wParam == 'R')
         {
-            // Toggle between 720p and 480p fallback
+            // Toggle between 1280x720 and 640x480 fallback
             if (g_currentWidth == 1280)
                 SwitchResolution(640, 480);
             else
                 SwitchResolution(1280, 720);
-        }
-        else if (wParam == VK_F8)
-        {
-            SetModeDiagnostic();
-        }
-        else if (wParam == VK_F9)
-        {
-            SetModeNormal();
         }
         break;
 
@@ -114,23 +144,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         int clientW = clientRect.right - clientRect.left;
         int clientH = clientRect.bottom - clientRect.top;
 
-        // Draw camera frame if available
-        if (!g_processedFrameBuffer.empty() && g_currentWidth > 0 && g_currentHeight > 0)
+        // Render live camera frame with correct BGRA color ordering
+        if (!g_processedBgraBuffer.empty() && g_currentWidth > 0 && g_currentHeight > 0)
         {
             BITMAPINFO bmi = { 0 };
             bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
             bmi.bmiHeader.biWidth = g_currentWidth;
-            bmi.bmiHeader.biHeight = -g_currentHeight; // top-down DIB
+            bmi.bmiHeader.biHeight = -g_currentHeight; // Top-down DIB
             bmi.bmiHeader.biPlanes = 1;
             bmi.bmiHeader.biBitCount = 32;
-            bmi.bmiHeader.biCompression = BI_RGB;
+            bmi.bmiHeader.biCompression = BI_RGB; // BGRA format matches GDI
 
             SetStretchBltMode(hdc, COLORONCOLOR);
             StretchDIBits(
                 hdc,
                 0, 0, clientW, clientH,
                 0, 0, g_currentWidth, g_currentHeight,
-                g_processedFrameBuffer.data(),
+                g_processedBgraBuffer.data(),
                 &bmi,
                 DIB_RGB_COLORS,
                 SRCCOPY
@@ -138,8 +168,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         else
         {
-            // Background fill if waiting for camera
-            HBRUSH hBr = CreateSolidBrush(RGB(15, 17, 23));
+            // Dark solid background if waiting for camera
+            HBRUSH hBr = CreateSolidBrush(RGB(12, 14, 18));
             FillRect(hdc, &clientRect, hBr);
             DeleteObject(hBr);
         }
@@ -147,55 +177,72 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         // Draw HUD overlay
         SetBkMode(hdc, TRANSPARENT);
         HFONT hFont = CreateFontA(
-            17, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI"
         );
         HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
 
         // HUD Banner Background
-        RECT hudRect = { 10, 10, 480, 110 };
-        HBRUSH hudBg = CreateSolidBrush(RGB(20, 24, 33));
+        RECT hudRect = { 10, 10, 520, 135 };
+        HBRUSH hudBg = CreateSolidBrush(RGB(18, 22, 30));
         FillRect(hdc, &hudRect, hudBg);
         DeleteObject(hudBg);
         FrameRect(hdc, &hudRect, (HBRUSH)GetStockObject(DKGRAY_BRUSH));
 
-        // Mode Status
-        if (g_mode == AppMode::NORMAL)
+        // Line 1: Mode Status
+        if (!g_horror.IsActive())
         {
             SetTextColor(hdc, RGB(52, 211, 153)); // Emerald Green
-            TextOutA(hdc, 20, 18, "MODE: NORMAL (LIVE PASSTHROUGH)", 31);
+            TextOutA(hdc, 20, 18, "MODE: NORMAL (LIVE WEBCAM PASSTHROUGH)", 38);
         }
         else
         {
             SetTextColor(hdc, RGB(248, 113, 113)); // Red Alert
-            TextOutA(hdc, 20, 18, "MODE: DIAGNOSTIC TEST PULSE (450ms)", 35);
+            std::string name = g_horror.GetCurrentEffectName();
+            int pct = (int)(g_horror.GetProgress() * 100.0f);
+            std::stringstream ss;
+            ss << name << " [" << pct << "%]";
+            std::string s = ss.str();
+            TextOutA(hdc, 20, 18, s.c_str(), (int)s.length());
         }
 
-        // Resolution & FPS
-        SetTextColor(hdc, RGB(220, 225, 235));
-        std::stringstream ss;
-        ss << "Camera: " << g_currentWidth << "x" << g_currentHeight
-           << " | Measured FPS: " << std::fixed << std::setprecision(1) << g_measuredFps;
-        std::string statsStr = ss.str();
+        // Line 2: Camera Telemetry & Format
+        SetTextColor(hdc, RGB(225, 230, 240));
+        std::stringstream ssStats;
+        ssStats << "Camera: " << g_currentWidth << "x" << g_currentHeight
+                << " | FPS: " << std::fixed << std::setprecision(1) << g_measuredFps
+                << " | Color: DirectShow BGRA -> Chrome RGBA";
+        std::string statsStr = ssStats.str();
         TextOutA(hdc, 20, 42, statsStr.c_str(), (int)statsStr.length());
 
-        // Virtual Camera & Chrome Status
+        // Line 3: Virtual Camera & Chrome Status
         bool vcamActive = g_virtualCam.IsConnected();
         if (vcamActive)
         {
-            SetTextColor(hdc, RGB(96, 165, 250)); // Blue
-            TextOutA(hdc, 20, 64, "Virtual Camera: 'UnityCapture' (Chrome Connected)", 49);
+            SetTextColor(hdc, RGB(96, 165, 250)); // Bright Blue
+            TextOutA(hdc, 20, 64, "Virtual Camera: 'UnityCapture' (CONNECTED & TRANSMITTING)", 56);
         }
         else
         {
-            SetTextColor(hdc, RGB(156, 163, 175)); // Gray
-            TextOutA(hdc, 20, 64, "Virtual Camera: 'UnityCapture' (Waiting for Chrome)", 51);
+            SetTextColor(hdc, RGB(160, 165, 175)); // Muted Gray
+            TextOutA(hdc, 20, 64, "Virtual Camera: 'UnityCapture' (Ready, waiting for Chrome)", 57);
         }
 
-        // Hotkey Help
+        // Line 4: Hotkey Commands
         SetTextColor(hdc, RGB(251, 191, 36)); // Amber
-        TextOutA(hdc, 20, 86, "[F8] Diagnostic Pulse  |  [F9] Restore Normal  |  [R] Toggle Res", 64);
+        TextOutA(hdc, 20, 86, "[F6] Edge Lurker  |  [F7] Sudden Lunger  |  [F8] Haunted Room", 60);
+
+        // Line 5: Restoration & Utilities
+        SetTextColor(hdc, RGB(147, 197, 253)); // Soft Cyan
+        TextOutA(hdc, 20, 108, "[F9] RESTORE NORMAL IMMEDIATELY  |  [R] 720p/480p  |  [ESC] Exit", 64);
+
+        // Hotkey Warning if any failed
+        if (!g_f6Registered || !g_f7Registered || !g_f8Registered || !g_f9Registered)
+        {
+            SetTextColor(hdc, RGB(252, 165, 165));
+            TextOutA(hdc, 20, 130, "Note: Some global hotkeys in use by OS; use number keys 1, 2, 3, 9 in window.", 76);
+        }
 
         SelectObject(hdc, hOldFont);
         DeleteObject(hFont);
@@ -205,7 +252,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     case WM_ERASEBKGND:
-        return 1; // Prevent flicker
+        return 1; // Prevent flicker during frame drawing
 
     case WM_DESTROY:
         PostQuitMessage(0);
@@ -244,10 +291,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     g_hWnd = CreateWindowExA(
         0,
         "ScareCamWindowClass",
-        "ScareCam - Windows 10 Virtual Camera Engine (v1.0)",
+        "ScareCam - Windows 10 Native Virtual Camera Engine (v1.0)",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         CW_USEDEFAULT, CW_USEDEFAULT,
-        960, 580,
+        980, 600,
         NULL, NULL, hInstance, NULL
     );
 
@@ -257,9 +304,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
         return 1;
     }
 
-    // 4. Register Global Hotkeys (F8 and F9 - work even when Chrome has foreground focus)
-    RegisterHotKey(g_hWnd, HOTKEY_ID_F8, 0, VK_F8);
-    RegisterHotKey(g_hWnd, HOTKEY_ID_F9, 0, VK_F9);
+    // 4. Register Global Hotkeys (F6, F7, F8, F9 - active even when Chrome has foreground focus)
+    g_f6Registered = (RegisterHotKey(g_hWnd, HOTKEY_ID_F6, 0, VK_F6) != FALSE);
+    g_f7Registered = (RegisterHotKey(g_hWnd, HOTKEY_ID_F7, 0, VK_F7) != FALSE);
+    g_f8Registered = (RegisterHotKey(g_hWnd, HOTKEY_ID_F8, 0, VK_F8) != FALSE);
+    g_f9Registered = (RegisterHotKey(g_hWnd, HOTKEY_ID_F9, 0, VK_F9) != FALSE);
 
     // 5. Connect to UnityCapture Virtual Camera
     g_virtualCam.Initialize(0);
@@ -270,12 +319,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
         // Try fallback to 640x480
         if (!g_camera.Start(0, 640, 480, 30))
         {
-            MessageBoxA(
-                g_hWnd,
-                "Could not open physical webcam.\nEnsure no other app is using it and privacy settings allow camera access.",
-                "ScareCam Camera Error",
-                MB_ICONEXCLAMATION
-            );
+            std::string err = g_camera.GetLastErrorMsg();
+            if (err.empty()) err = "Could not open physical webcam.\nEnsure no other app is using it and privacy settings allow camera access.";
+            MessageBoxA(g_hWnd, err.c_str(), "ScareCam Camera Warning", MB_ICONEXCLAMATION);
         }
     }
 
@@ -302,42 +348,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 
         if (!g_isRunning) break;
 
-        // Auto-revert diagnostic mode after 450 ms
-        if (g_mode == AppMode::DIAGNOSTIC)
-        {
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_diagnosticStartTime).count();
-            if (elapsed >= DIAGNOSTIC_DURATION_MS)
-            {
-                SetModeNormal();
-            }
-        }
-
-        // Read physical webcam frame
+        // Read physical webcam frame (in canonical clean BGRA)
         int w = 0, h = 0;
-        if (g_camera.ReadFrame(g_rawFrameBuffer, w, h))
+        if (g_camera.ReadFrame(g_rawBgraBuffer, w, h))
         {
             g_currentWidth = w;
             g_currentHeight = h;
 
             size_t frameBytes = (size_t)w * h * 4;
-            if (g_processedFrameBuffer.size() != frameBytes)
+            if (g_processedBgraBuffer.size() != frameBytes)
             {
-                g_processedFrameBuffer.resize(frameBytes);
+                g_processedBgraBuffer.resize(frameBytes);
             }
 
-            // Apply diagnostic pulse if in diagnostic mode
-            if (g_mode == AppMode::DIAGNOSTIC)
-            {
-                g_effect.Apply(g_rawFrameBuffer.data(), g_processedFrameBuffer.data(), w, h);
-            }
-            else
-            {
-                memcpy(g_processedFrameBuffer.data(), g_rawFrameBuffer.data(), frameBytes);
-            }
+            // Process active horror effect (or pass through cleanly)
+            g_horror.ProcessFrame(g_rawBgraBuffer.data(), g_processedBgraBuffer.data(), w, h);
 
-            // Transmit to DirectShow Virtual Camera (for Chrome to receive)
-            g_virtualCam.SendFrame(w, h, g_processedFrameBuffer.data());
+            // Transmit to DirectShow Virtual Camera for Chrome (converts BGRA -> RGBA)
+            g_virtualCam.SendFrameBGRA(w, h, g_processedBgraBuffer.data());
 
             // FPS calculation
             g_renderedFrames++;
@@ -361,8 +389,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     }
 
     // 8. Clean Resource Teardown on Exit
-    UnregisterHotKey(g_hWnd, HOTKEY_ID_F8);
-    UnregisterHotKey(g_hWnd, HOTKEY_ID_F9);
+    if (g_f6Registered) UnregisterHotKey(g_hWnd, HOTKEY_ID_F6);
+    if (g_f7Registered) UnregisterHotKey(g_hWnd, HOTKEY_ID_F7);
+    if (g_f8Registered) UnregisterHotKey(g_hWnd, HOTKEY_ID_F8);
+    if (g_f9Registered) UnregisterHotKey(g_hWnd, HOTKEY_ID_F9);
 
     g_camera.Stop();
     g_virtualCam.Shutdown();
