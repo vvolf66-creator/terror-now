@@ -1,0 +1,71 @@
+name: Windows 10 Native CI Build
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - BUILD_NOW
+
+jobs:
+  build-windows:
+    name: Build ScareCam Windows x64 Native Binary
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC C++ Environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build ScareCam Executable
+        run: |
+          cmake --build build --config Release --verbose
+
+      - name: Verify Executable Architecture & Integrity
+        shell: pwsh
+        run: |
+          $exePath = "build/Release/ScareCam.exe"
+          if (!(Test-Path $exePath)) {
+            $exePath = "build/ScareCam.exe"
+          }
+          if (!(Test-Path $exePath)) {
+            Write-Error "ScareCam.exe was not produced by the build!"
+            exit 1
+          }
+          $item = Get-Item $exePath
+          Write-Host "ScareCam.exe successfully compiled: Size = $($item.Length) bytes"
+          
+          # Inspect PE header machine architecture (IMAGE_FILE_MACHINE_AMD64 = 0x8664)
+          $bytes = [System.IO.File]::ReadAllBytes($item.FullName)
+          $peOffset = [System.BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [System.BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          if ($machine -eq 0x8664) {
+            Write-Host "PE Machine Header: x64 (AMD64) Verified."
+          } else {
+            Write-Warning "Machine architecture: $machine"
+          }
+
+      - name: Prepare Artifact Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "dist" -Force | Out-Null
+          $exePath = "build/Release/ScareCam.exe"
+          if (!(Test-Path $exePath)) { $exePath = "build/ScareCam.exe" }
+          Copy-Item $exePath -Destination "dist/ScareCam.exe"
+          Copy-Item "README.md" -Destination "dist/README.md"
+          Copy-Item "VERIFICATION_CHECKLIST.md" -Destination "dist/VERIFICATION_CHECKLIST.md"
+
+      - name: Upload Windows Executable Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScareCam-Windows10-x64-Binary
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
