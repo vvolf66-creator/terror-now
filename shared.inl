@@ -18,6 +18,7 @@
 
 #pragma once
 
+#define _HAS_EXCEPTIONS 0
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <initguid.h>
@@ -41,6 +42,7 @@ struct SharedImageMemory
 
 	~SharedImageMemory()
 	{
+		if (m_pSharedBuf) UnmapViewOfFile(m_pSharedBuf);
 		if (m_hMutex) CloseHandle(m_hMutex);
 		if (m_hWantFrameEvent) CloseHandle(m_hWantFrameEvent);
 		if (m_hSentFrameEvent) CloseHandle(m_hSentFrameEvent);
