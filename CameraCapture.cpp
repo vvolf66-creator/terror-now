@@ -1,6 +1,7 @@
 #include "CameraCapture.h"
 #include <mferror.h>
 #include <iostream>
+#include <sstream>
 
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfreadwrite.lib")
@@ -21,6 +22,8 @@ CameraCapture::CameraCapture()
     , m_isCapturing(false)
     , m_actualWidth(0)
     , m_actualHeight(0)
+    , m_stride(0)
+    , m_isBottomUp(false)
     , m_videoSubtype(MFVideoFormat_RGB32)
 {
 }
@@ -50,6 +53,7 @@ void CameraCapture::ShutdownMF()
 bool CameraCapture::Start(int deviceIndex, int targetWidth, int targetHeight, int targetFps)
 {
     Stop();
+    m_lastError.clear();
 
     IMFAttributes* pAttributes = nullptr;
     IMFActivate** ppDevices = nullptr;
@@ -57,21 +61,34 @@ bool CameraCapture::Start(int deviceIndex, int targetWidth, int targetHeight, in
     IMFMediaSource* pSource = nullptr;
 
     HRESULT hr = MFCreateAttributes(&pAttributes, 1);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr))
+    {
+        m_lastError = "Failed to allocate Media Foundation attributes.";
+        return false;
+    }
 
     hr = pAttributes->SetGUID(
         MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
         MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID
     );
-    if (FAILED(hr)) { SafeRelease(&pAttributes); return false; }
+    if (FAILED(hr))
+    {
+        SafeRelease(&pAttributes);
+        m_lastError = "Failed to set video capture attribute.";
+        return false;
+    }
 
     hr = MFEnumDeviceSources(pAttributes, &ppDevices, &count);
     SafeRelease(&pAttributes);
-    if (FAILED(hr) || count == 0) return false;
+    if (FAILED(hr) || count == 0)
+    {
+        m_lastError = "No physical webcams detected on this system.";
+        return false;
+    }
 
-    if (deviceIndex < 0 || deviceIndex >= (int)count) deviceIndex = 0;
+    if (deviceIndex >= (int)count) deviceIndex = 0;
 
-    // Get friendly name of the physical webcam
+    // Get friendly device name
     WCHAR name[256] = { 0 };
     UINT32 nameLen = 0;
     ppDevices[deviceIndex]->GetString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, name, 256, &nameLen);
@@ -85,9 +102,15 @@ bool CameraCapture::Start(int deviceIndex, int targetWidth, int targetHeight, in
     }
     CoTaskMemFree(ppDevices);
 
-    if (FAILED(hr)) return false;
+    if (FAILED(hr))
+    {
+        std::stringstream ss;
+        ss << "Camera device busy or access denied (hr=0x" << std::hex << hr << "). Check Windows Camera Privacy settings.";
+        m_lastError = ss.str();
+        return false;
+    }
 
-    // Create SourceReader with low latency and hardware acceleration attributes
+    // Configure SourceReader attributes for low latency and hardware acceleration
     hr = MFCreateAttributes(&pAttributes, 2);
     if (SUCCEEDED(hr))
     {
@@ -99,14 +122,19 @@ bool CameraCapture::Start(int deviceIndex, int targetWidth, int targetHeight, in
     SafeRelease(&pAttributes);
     SafeRelease(&pSource);
 
-    if (FAILED(hr)) return false;
+    if (FAILED(hr))
+    {
+        m_lastError = "Failed to create Media Foundation SourceReader.";
+        return false;
+    }
 
-    // Configure Media Type (Resolution & RGB32 output)
+    // Configure Media Type (Target resolution & uncompressed format)
     if (!ConfigureMediaType(targetWidth, targetHeight, targetFps))
     {
-        // Retry a smaller format, and fail if neither format was negotiated.
-        if (targetWidth == 640 || !ConfigureMediaType(640, 480, 30))
+        // Try fallback to 640x480 if target was 720p
+        if (targetWidth != 640 && !ConfigureMediaType(640, 480, 30))
         {
+            m_lastError = "Could not negotiate compatible video format (720p or 480p).";
             Stop();
             return false;
         }
@@ -120,29 +148,66 @@ bool CameraCapture::ConfigureMediaType(int targetWidth, int targetHeight, int ta
 {
     if (!m_pReader) return false;
 
-    // Set output format on SourceReader to uncompressed RGB32
-    // Windows Media Foundation automatically inserts internal color converter transforms if needed
     IMFMediaType* pMediaType = nullptr;
     HRESULT hr = MFCreateMediaType(&pMediaType);
     if (FAILED(hr)) return false;
 
     hr = pMediaType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    if (SUCCEEDED(hr)) hr = pMediaType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-    if (SUCCEEDED(hr)) hr = MFSetAttributeSize(pMediaType, MF_MT_FRAME_SIZE, targetWidth, targetHeight);
-    if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(pMediaType, MF_MT_FRAME_RATE, targetFps, 1);
+    hr = pMediaType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+    hr = MFSetAttributeSize(pMediaType, MF_MT_FRAME_SIZE, targetWidth, targetHeight);
+    hr = MFSetAttributeRatio(pMediaType, MF_MT_FRAME_RATE, targetFps, 1);
 
-    if (SUCCEEDED(hr)) hr = m_pReader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, pMediaType);
+    hr = m_pReader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, pMediaType);
     SafeRelease(&pMediaType);
 
+    IMFMediaType* pCurrentType = nullptr;
     if (SUCCEEDED(hr))
     {
-        m_actualWidth = targetWidth;
-        m_actualHeight = targetHeight;
-        m_videoSubtype = MFVideoFormat_RGB32;
+        hr = m_pReader->GetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &pCurrentType);
+    }
+    // Never interpret a native YUY2/NV12/MJPEG sample as RGB32 when conversion negotiation failed.
+
+    if (SUCCEEDED(hr) && pCurrentType)
+    {
+        UINT32 w = 0, h = 0;
+        MFGetAttributeSize(pCurrentType, MF_MT_FRAME_SIZE, &w, &h);
+        pCurrentType->GetGUID(MF_MT_SUBTYPE, &m_videoSubtype);
+        if (m_videoSubtype != MFVideoFormat_RGB32 || !w || !h)
+        {
+            SafeRelease(&pCurrentType);
+            return false;
+        }
+        m_actualWidth = (int)w;
+        m_actualHeight = (int)h;
+
+        // Query default stride to properly determine row pitch and bottom-up/top-down orientation
+        UINT32 strideVal = 0;
+        HRESULT hrStride = pCurrentType->GetUINT32(MF_MT_DEFAULT_STRIDE, &strideVal);
+        if (SUCCEEDED(hrStride))
+        {
+            INT32 s = (INT32)strideVal;
+            if (s < 0)
+            {
+                m_isBottomUp = true;
+                m_stride = -s;
+            }
+            else
+            {
+                m_isBottomUp = false;
+                m_stride = s;
+            }
+        }
+        else
+        {
+            // Fallback default stride
+            m_isBottomUp = false;
+            m_stride = m_actualWidth * 4;
+        }
+
+        SafeRelease(&pCurrentType);
         return true;
     }
 
-    // Do not reinterpret an arbitrary native media type as tightly packed RGB32.
     return false;
 }
 
@@ -152,9 +217,11 @@ void CameraCapture::Stop()
     SafeRelease(&m_pReader);
     m_actualWidth = 0;
     m_actualHeight = 0;
+    m_stride = 0;
+    m_isBottomUp = false;
 }
 
-bool CameraCapture::ReadFrame(std::vector<uint8_t>& outRgbaBuffer, int& outWidth, int& outHeight)
+bool CameraCapture::ReadFrame(std::vector<uint8_t>& outBgraBuffer, int& outWidth, int& outHeight)
 {
     if (!m_isCapturing || !m_pReader) return false;
 
@@ -172,7 +239,7 @@ bool CameraCapture::ReadFrame(std::vector<uint8_t>& outRgbaBuffer, int& outWidth
         &pSample
     );
 
-    if (FAILED(hr) || !pSample)
+    if (FAILED(hr) || (flags & (MF_SOURCE_READERF_ERROR | MF_SOURCE_READERF_ENDOFSTREAM)) || !pSample)
     {
         return false;
     }
@@ -194,42 +261,53 @@ bool CameraCapture::ReadFrame(std::vector<uint8_t>& outRgbaBuffer, int& outWidth
         outWidth = m_actualWidth;
         outHeight = m_actualHeight;
         size_t requiredSize = (size_t)outWidth * outHeight * 4;
-        if (outRgbaBuffer.size() != requiredSize)
+        if (outBgraBuffer.size() != requiredSize)
         {
-            outRgbaBuffer.resize(requiredSize);
+            outBgraBuffer.resize(requiredSize);
+        }
+
+        int rowBytes = outWidth * 4;
+        int effectiveStride = (m_stride > 0) ? m_stride : rowBytes;
+
+        if (effectiveStride < rowBytes || cbLen < (size_t)(outHeight - 1) * effectiveStride + rowBytes)
+        {
+            pBuffer->Unlock();
+            SafeRelease(&pBuffer);
+            SafeRelease(&pSample);
+            return false;
         }
 
         if (m_videoSubtype == MFVideoFormat_RGB32)
         {
-            // Media Foundation RGB32 is B,G,R,X. Unity Capture UINT8 expects R,G,B,A.
-            if (cbLen < requiredSize)
+            // Unpack row-by-row respecting stride and bottom-up/top-down orientation
+            for (int y = 0; y < outHeight; ++y)
             {
-                pBuffer->Unlock();
-                SafeRelease(&pBuffer);
-                SafeRelease(&pSample);
-                return false;
-            }
-            for (size_t i = 0; i < requiredSize; i += 4)
-            {
-                outRgbaBuffer[i] = pData[i + 2];
-                outRgbaBuffer[i + 1] = pData[i + 1];
-                outRgbaBuffer[i + 2] = pData[i];
-                outRgbaBuffer[i + 3] = 255;
+                int srcY = m_isBottomUp ? (outHeight - 1 - y) : y;
+                const uint8_t* pSrcRow = pData + (srcY * effectiveStride);
+                uint8_t* pDstRow = outBgraBuffer.data() + (y * rowBytes);
+
+                memcpy(pDstRow, pSrcRow, rowBytes);
+
+                // Ensure alpha channel is solid 255
+                for (int x = 0; x < outWidth; ++x)
+                {
+                    pDstRow[x * 4 + 3] = 255;
+                }
             }
         }
         else if (m_videoSubtype == MFVideoFormat_YUY2)
         {
-            ConvertYUY2ToRGBA(pData, outRgbaBuffer.data(), outWidth, outHeight);
+            ConvertYUY2ToBGRA(pData, outBgraBuffer.data(), outWidth, outHeight, effectiveStride, m_isBottomUp);
         }
         else if (m_videoSubtype == MFVideoFormat_NV12)
         {
-            ConvertNV12ToRGBA(pData, outRgbaBuffer.data(), outWidth, outHeight);
+            ConvertNV12ToBGRA(pData, outBgraBuffer.data(), outWidth, outHeight, effectiveStride, m_isBottomUp);
         }
         else
         {
-            // Fallback direct copy
+            // General copy
             size_t copyBytes = (cbLen < requiredSize) ? cbLen : requiredSize;
-            memcpy(outRgbaBuffer.data(), pData, copyBytes);
+            memcpy(outBgraBuffer.data(), pData, copyBytes);
         }
 
         pBuffer->Unlock();
@@ -248,61 +326,74 @@ static inline uint8_t ClampByte(int val)
     return (uint8_t)(val < 0 ? 0 : (val > 255 ? 255 : val));
 }
 
-void CameraCapture::ConvertYUY2ToRGBA(const uint8_t* yuy2, uint8_t* rgba, int width, int height)
+// Converts YUY2 to clean top-down 32-bit BGRA (B=0, G=1, R=2, A=3)
+void CameraCapture::ConvertYUY2ToBGRA(const uint8_t* yuy2, uint8_t* bgra, int width, int height, int stride, bool isBottomUp)
 {
-    int pixelCount = width * height;
-    for (int i = 0, j = 0; i < pixelCount; i += 2, j += 4)
+    for (int y = 0; y < height; ++y)
     {
-        int y0 = yuy2[j + 0];
-        int u0 = yuy2[j + 1] - 128;
-        int y1 = yuy2[j + 2];
-        int v0 = yuy2[j + 3] - 128;
+        int srcY = isBottomUp ? (height - 1 - y) : y;
+        const uint8_t* pSrcRow = yuy2 + (srcY * (width * 2));
+        uint8_t* pDstRow = bgra + (y * width * 4);
 
-        int r0 = y0 + ((1402 * v0) >> 10);
-        int g0 = y0 - ((344 * u0 + 714 * v0) >> 10);
-        int b0 = y0 + ((1772 * u0) >> 10);
+        for (int x = 0, j = 0; x < width; x += 2, j += 4)
+        {
+            int y0 = pSrcRow[j + 0];
+            int u0 = pSrcRow[j + 1] - 128;
+            int y1 = pSrcRow[j + 2];
+            int v0 = pSrcRow[j + 3] - 128;
 
-        int r1 = y1 + ((1402 * v0) >> 10);
-        int g1 = y1 - ((344 * u0 + 714 * v0) >> 10);
-        int b1 = y1 + ((1772 * u0) >> 10);
+            int r0 = y0 + ((1402 * v0) >> 10);
+            int g0 = y0 - ((344 * u0 + 714 * v0) >> 10);
+            int b0 = y0 + ((1772 * u0) >> 10);
 
-        int outIdx0 = i * 4;
-        rgba[outIdx0 + 0] = ClampByte(r0);
-        rgba[outIdx0 + 1] = ClampByte(g0);
-        rgba[outIdx0 + 2] = ClampByte(b0);
-        rgba[outIdx0 + 3] = 255;
+            int r1 = y1 + ((1402 * v0) >> 10);
+            int g1 = y1 - ((344 * u0 + 714 * v0) >> 10);
+            int b1 = y1 + ((1772 * u0) >> 10);
 
-        int outIdx1 = (i + 1) * 4;
-        rgba[outIdx1 + 0] = ClampByte(r1);
-        rgba[outIdx1 + 1] = ClampByte(g1);
-        rgba[outIdx1 + 2] = ClampByte(b1);
-        rgba[outIdx1 + 3] = 255;
+            // Pixel 0 (BGRA)
+            pDstRow[x * 4 + 0] = ClampByte(b0);
+            pDstRow[x * 4 + 1] = ClampByte(g0);
+            pDstRow[x * 4 + 2] = ClampByte(r0);
+            pDstRow[x * 4 + 3] = 255;
+
+            // Pixel 1 (BGRA)
+            pDstRow[(x + 1) * 4 + 0] = ClampByte(b1);
+            pDstRow[(x + 1) * 4 + 1] = ClampByte(g1);
+            pDstRow[(x + 1) * 4 + 2] = ClampByte(r1);
+            pDstRow[(x + 1) * 4 + 3] = 255;
+        }
     }
 }
 
-void CameraCapture::ConvertNV12ToRGBA(const uint8_t* nv12, uint8_t* rgba, int width, int height)
+// Converts NV12 to clean top-down 32-bit BGRA (B=0, G=1, R=2, A=3)
+void CameraCapture::ConvertNV12ToBGRA(const uint8_t* nv12, uint8_t* bgra, int width, int height, int stride, bool isBottomUp)
 {
     const uint8_t* yPlane = nv12;
     const uint8_t* uvPlane = nv12 + (width * height);
 
-    for (int y = 0; y < height; y++)
+    for (int y = 0; y < height; ++y)
     {
-        for (int x = 0; x < width; x++)
+        int srcY = isBottomUp ? (height - 1 - y) : y;
+        const uint8_t* pYRow = yPlane + (srcY * width);
+        const uint8_t* pUVRow = uvPlane + ((srcY / 2) * width);
+        uint8_t* pDstRow = bgra + (y * width * 4);
+
+        for (int x = 0; x < width; ++x)
         {
-            int yVal = yPlane[y * width + x];
-            int uvIdx = (y / 2) * width + (x & ~1);
-            int uVal = uvPlane[uvIdx] - 128;
-            int vVal = uvPlane[uvIdx + 1] - 128;
+            int yVal = pYRow[x];
+            int uvIdx = (x & ~1);
+            int uVal = pUVRow[uvIdx + 0] - 128;
+            int vVal = pUVRow[uvIdx + 1] - 128;
 
             int r = yVal + ((1402 * vVal) >> 10);
             int g = yVal - ((344 * uVal + 714 * vVal) >> 10);
             int b = yVal + ((1772 * uVal) >> 10);
 
-            int outIdx = (y * width + x) * 4;
-            rgba[outIdx + 0] = ClampByte(r);
-            rgba[outIdx + 1] = ClampByte(g);
-            rgba[outIdx + 2] = ClampByte(b);
-            rgba[outIdx + 3] = 255;
+            // BGRA layout
+            pDstRow[x * 4 + 0] = ClampByte(b);
+            pDstRow[x * 4 + 1] = ClampByte(g);
+            pDstRow[x * 4 + 2] = ClampByte(r);
+            pDstRow[x * 4 + 3] = 255;
         }
     }
 }
