@@ -21,6 +21,7 @@ target_link_libraries(ScareCam PRIVATE
     ole32
     oleaut32
     mfplat
+    mf
     mfreadwrite
     mfuuid
 )
