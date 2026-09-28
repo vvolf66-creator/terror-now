@@ -45,7 +45,7 @@
   5. Speak into the microphone and confirm Chrome receives audio from the physical laptop microphone.
 * **Pass Criteria:**
   - [ ] Video streams into Chrome smoothly at ~30 fps.
-  - [ ] Latency is low (under 2 frames compared to physical camera).
+  - [ ] Record whether the visible delay is acceptable for conversation.
   - [ ] Physical microphone functions directly without audio mixer interference.
 
 ---
@@ -76,6 +76,6 @@
   4. Observe Memory (Working Set) utilization.
   5. Close `ScareCam.exe` with `ESC` or the close box (`X`), and verify that all memory and camera devices are cleanly released.
 * **Observations to Record on your PC:**
-  - Observed CPU %: `____ %` (Target: ~1.5% to 4.0%)
-  - Observed RAM: `____ MB` (Target: ~25 MB to 35 MB)
+  - Observed CPU %: `____ %` (no measured target yet)
+  - Observed RAM: `____ MB` (no measured target yet)
   - Clean exit with zero residual background processes: `[ YES / NO ]`
